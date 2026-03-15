@@ -18,7 +18,7 @@ from pipeline_v2 import (
     stage1_classify, stage2_lung_mask, stage3_target_extraction,
     stage4_route_diffuse, stage4_route_solid,
     nms_merge_findings, generate_master_canvas, generate_report,
-    POSITIVE_THRESHOLD, SUSPECT_THRESHOLD, PATHOLOGY_CN, banner,
+    POSITIVE_THRESHOLD, PATHOLOGY_CN, banner,
     OUTPUT_DIR
 )
 

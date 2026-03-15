@@ -39,7 +39,9 @@ MEDSAM_CHECKPOINT = os.path.join(SCRIPT_DIR, "model", "medsam_vit_b.pth")
 IMG_NAME = os.path.splitext(os.path.basename(IMG_PATH))[0]  # e.g. "pneumonia_test"
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "test_output", IMG_NAME)
 MEDSAM_IMG_SIZE = 1024
-POSITIVE_THRESHOLD = 0.5  # 严格阈值: >50% 才算阳性
+# 注意: 不再使用固定阈值! 改用 model.op_threshs 逐病种动态阈值
+# POSITIVE_THRESHOLD = 0.5  # [已废除] 一刀切阈值导致严重漏诊
+POSITIVE_THRESHOLD = None  # 保留变量名兼容, 运行时动态设置
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -89,10 +91,10 @@ def banner(msg):
 
 
 # ============================================================
-# 第一阶: 大视野定性 — 到底是啥病？(支持并发检测)
+# 第一阶: 大视野定性 — 动态阈值 (Operating Thresholds)
 # ============================================================
-CONCURRENT_GAP = 0.10   # Top2 与 Top1 差距 <10% 时视为并发
-SUSPECT_THRESHOLD = 0.30 # 30-50% 之间且显著高于第二名 → 标记为可疑
+CONCURRENT_MARGIN_GAP = 0.05  # margin 差距 <5% 视为并发 (基于相对确信度)
+SUSPECT_THRESHOLD = None      # [已废除] 改用 op_threshs
 
 
 def _classify_disease_type(name):
@@ -108,9 +110,10 @@ def _classify_disease_type(name):
 def stage1_classify(img_path):
     """
     输入原始图片，运行 TorchXRayVision DenseNet121。
-    支持并发检测: 如果多个疾病概率接近且都 >阈值，全部作为目标。
+    使用 model.op_threshs 动态阈值逐病种判定，按 margin 排序并发检测。
     """
-    banner("第一阶: 大视野定性 — TorchXRayVision 分类")
+    global POSITIVE_THRESHOLD  # 运行时设为各病种阈值的中位数, 供可视化用
+    banner("第一阶: 大视野定性 — 动态阈值分类")
 
     # 加载图像
     print(f"  图像路径: {img_path}")
@@ -138,64 +141,74 @@ def stage1_classify(img_path):
         preds = model(img_tensor)
     all_results = dict(zip(model.pathologies, preds[0].cpu().numpy()))
 
+    # ── 提取模型官方动态最优阈值 ──
+    op_threshs = model.op_threshs  # 与 pathologies 一一对应的阈值数组
+    thresh_map = {}  # name → threshold
+    for i, name in enumerate(model.pathologies):
+        th = op_threshs[i]
+        if not np.isnan(th):
+            thresh_map[name] = float(th)
+        else:
+            thresh_map[name] = 0.5  # NaN 回退到 0.5
+
+    # 设置 POSITIVE_THRESHOLD 为所有阈值的中位数 (供可视化参考)
+    valid_threshs = [v for v in thresh_map.values() if v < 0.5]
+    POSITIVE_THRESHOLD = float(np.median(valid_threshs)) if valid_threshs else 0.1
+
+    # ── 计算每个疾病的 margin (超出专属阈值的幅度) ──
+    raw_results = []
+    for name, prob in all_results.items():
+        thresh = thresh_map.get(name, 0.5)
+        margin = float(prob) - thresh
+        raw_results.append({
+            'name': name,
+            'name_cn': PATHOLOGY_CN.get(name, name),
+            'prob': float(prob),
+            'thresh': thresh,
+            'margin': margin,
+            'is_positive': float(prob) > thresh
+        })
+
+    # 按 margin 降序排列 (最显著的疾病排最前)
+    raw_results.sort(key=lambda x: x['margin'], reverse=True)
+
     # 打印所有结果
-    print(f"\n  18 项检查结果 (阈值 > {POSITIVE_THRESHOLD}):")
-    sorted_results = sorted(all_results.items(), key=lambda x: -x[1])
-    for name, prob in sorted_results:
-        cn = PATHOLOGY_CN.get(name, name)
-        marker = "✅" if prob > POSITIVE_THRESHOLD else ("🟡" if prob > SUSPECT_THRESHOLD else "  ")
-        print(f"    {marker} {cn:8s} ({name:30s}): {prob:.1%}")
+    print(f"\n  18 项检查结果 (动态阈值):")
+    for r in raw_results:
+        marker = "✅" if r['is_positive'] else "  "
+        print(f"    {marker} {r['name_cn']:8s} ({r['name']:30s}): "
+              f"{r['prob']:.3f} > {r['thresh']:.4f}  "
+              f"margin={r['margin']:+.3f}")
 
-    # === 并发检测逻辑 ===
-    top_name, top_prob = sorted_results[0]
+    # ── 并发检测逻辑 (基于 margin) ──
+    positives = [r for r in raw_results if r['is_positive']]
 
-    # 情况 1: 最高概率都没超过可疑阈值 → 未见异常
-    if top_prob <= SUSPECT_THRESHOLD:
-        print(f"\n  🟢 结论: 未见明显异常 (最高概率 {top_name}: {top_prob:.1%} < {SUSPECT_THRESHOLD})")
+    if not positives:
+        top = raw_results[0]
+        print(f"\n  🟢 结论: 未见超过动态阈值的显著病理特征")
+        print(f"     最接近: {top['name_cn']} (margin={top['margin']:+.3f})")
         return None, None, None, None, None, all_results
 
-    # 收集所有目标 (>阈值 且 与Top1差距<10%)
+    # 收集目标: 所有超过自身 op_thresh 的疾病 (按 margin 排序, 最多取 8 个)
+    MAX_CONCURRENT = 8
     targets = []
-    for name, prob in sorted_results:
-        if prob > POSITIVE_THRESHOLD and (top_prob - prob) <= CONCURRENT_GAP:
-            disease_type = _classify_disease_type(name)
-            targets.append({
-                'name': name,
-                'name_cn': PATHOLOGY_CN.get(name, name),
-                'prob': float(prob),
-                'disease_type': disease_type
-            })
-
-    # 情况 2: 没有超过严格阈值，但 Top1 在可疑区间 (30-50%)
-    #         且它比第二名高出 15%+ → 标记为"可疑"
-    if not targets and top_prob > SUSPECT_THRESHOLD:
-        second_prob = sorted_results[1][1] if len(sorted_results) > 1 else 0
-        if (top_prob - second_prob) > 0.15:
-            disease_type = _classify_disease_type(top_name)
-            targets.append({
-                'name': top_name,
-                'name_cn': PATHOLOGY_CN.get(top_name, top_name),
-                'prob': float(top_prob),
-                'disease_type': disease_type,
-                'suspect': True  # 标记为可疑而非确定
-            })
-            print(f"\n  🟡 可疑目标: {targets[0]['name_cn']} ({top_prob:.1%})")
-            print(f"     概率未达阈值但显著高于第二名 (差距 {top_prob - second_prob:.1%})")
-
-    if not targets:
-        print(f"\n  🟢 结论: 未见明显异常 (最高概率 {top_name}: {top_prob:.1%})")
-        return None, None, None, None, None, all_results
+    for r in positives[:MAX_CONCURRENT]:
+        disease_type = _classify_disease_type(r['name'])
+        targets.append({
+            'name': r['name'],
+            'name_cn': r['name_cn'],
+            'prob': r['prob'],
+            'thresh': r['thresh'],
+            'margin': r['margin'],
+            'disease_type': disease_type
+        })
 
     # 打印锁定结果
-    if len(targets) == 1:
-        t = targets[0]
-        status = "🟡 可疑" if t.get('suspect') else "🎯 锁定"
-        print(f"\n  {status}: {t['name_cn']} ({t['name']})  置信度: {t['prob']:.1%}")
-        print(f"  📋 疾病类型: {t['disease_type']}")
-    else:
-        print(f"\n  🎯 检测到 {len(targets)} 个并发目标 (概率差距 <{CONCURRENT_GAP:.0%}):")
-        for i, t in enumerate(targets, 1):
-            print(f"    [{i}] {t['name_cn']} ({t['name']}): {t['prob']:.1%}  [{t['disease_type']}]")
+    print(f"\n  🎯 检测到 {len(targets)} 个目标 (动态阈值):")
+    for i, t in enumerate(targets, 1):
+        print(f"    [{i}] {t['name_cn']} ({t['name']}): "
+              f"概率={t['prob']:.3f} > 阈值={t['thresh']:.4f}  "
+              f"margin={t['margin']:+.3f}  [{t['disease_type']}]")
 
     return model, img_tensor, img_224, img_xrv, img_rgb, all_results, targets
 
@@ -680,8 +693,10 @@ def generate_master_canvas(img_rgb, findings, lung_mask_224, all_results):
     colors = ['#e74c3c' if n in primary_names else '#bdc3c7'
               for n, _ in sorted_items]
     ax_bar.barh(names, probs, color=colors)
-    ax_bar.axvline(x=POSITIVE_THRESHOLD, color='red', linestyle='--', alpha=0.7,
-                   label=f'阈值={POSITIVE_THRESHOLD}')
+    # 不再画单一阈值线 (各病种阈值不同), 改为标注中位数参考线
+    if POSITIVE_THRESHOLD is not None:
+        ax_bar.axvline(x=POSITIVE_THRESHOLD, color='red', linestyle='--', alpha=0.4,
+                       label=f'中位阈值≈{POSITIVE_THRESHOLD:.3f}')
     ax_bar.set_xlim(0, 1)
     ax_bar.set_title(f"分类概率 ({n_findings} 个发现)", fontsize=14)
     ax_bar.legend(fontsize=9)
