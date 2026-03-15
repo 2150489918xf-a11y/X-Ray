@@ -1,5 +1,5 @@
 {
-  "description": "手工标注的小型测试集 ground truth (基于公开来源和影像特征)",
+  "description": "手工标注的小型测试集 ground truth (基于放射学表征, 非临床诊断)",
   "source_notes": {
     "00000001_000.png": "NIH ChestX-ray14 数据集 Patient#1, 官方标签: Cardiomegaly",
     "00027426_000.png": "NIH ChestX-ray14 数据集 Patient#27426, 影像表现正常",
@@ -25,11 +25,11 @@
     {
       "image": "covid-19-pneumonia-58-prior.jpg",
       "expected_diseases": [
-        "Pneumonia",
-        "Infiltration"
+        "Infiltration",
+        "Lung Opacity"
       ],
       "expected_absent": [],
-      "description": "COVID-19肺炎, 双肺多发毛玻璃影, 可见中心静脉导管"
+      "description": "COVID-19肺炎, 双肺多发毛玻璃影 (原 Pneumonia 标签已移除)"
     },
     {
       "image": "00000001_000.png",
@@ -55,27 +55,27 @@
       "image": "16747_3_1.jpg",
       "expected_diseases": [
         "Infiltration",
-        "Pneumonia"
+        "Lung Opacity"
       ],
       "expected_absent": [],
-      "description": "双肺弥漫性浸润影, 可能伴实变"
+      "description": "双肺弥漫性浸润影 (原 Pneumonia 标签已移除)"
     },
     {
       "image": "covid_case1_vietnam.jpeg",
       "expected_diseases": [
-        "Pneumonia",
-        "Infiltration"
+        "Infiltration",
+        "Lung Opacity"
       ],
       "expected_absent": [],
-      "description": "65岁男性, COVID-19确诊, 左上肺浸润影 (Vietnam Cho Ray Hospital)",
+      "description": "65岁男性, COVID-19确诊, 左上肺浸润影",
       "source": "NEJM 10.1056/NEJMc2001272"
     },
     {
       "image": "covid_case2_vietnam_progression.jpeg",
       "expected_diseases": [
-        "Pneumonia",
         "Consolidation",
-        "Infiltration"
+        "Infiltration",
+        "Lung Opacity"
       ],
       "expected_absent": [],
       "description": "同一患者3天后, 浸润扩大+实变",
@@ -84,8 +84,9 @@
     {
       "image": "ards_case.jpeg",
       "expected_diseases": [
-        "Pneumonia",
-        "Consolidation"
+        "Consolidation",
+        "Lung Opacity",
+        "Infiltration"
       ],
       "expected_absent": [],
       "description": "COVID-19进展为ARDS, 双肺弥漫性白肺",

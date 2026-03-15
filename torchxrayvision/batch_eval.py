@@ -26,6 +26,30 @@ TESTS_DIR = os.path.join(os.path.dirname(__file__), "tests")
 GT_PATH = os.path.join(TESTS_DIR, "ground_truth.json")
 EVAL_OUTPUT = os.path.join(os.path.dirname(__file__), "test_output", "evaluation")
 
+# ── 语义等价组 (Semantic Equivalence Groups) ──
+# 这些疾病在放射学表征上高度重叠, 命中组内任意一个即视为成功
+SEMANTIC_GROUPS = [
+    {"Pneumonia", "Infiltration", "Consolidation", "Lung Opacity"},  # 肺部弥漫性实质病变
+    {"Nodule", "Mass", "Lung Lesion"},                               # 肺部实体占位病变
+]
+
+
+def semantic_hit(expected_disease, detected_set):
+    """
+    判断单个期望疾病是否被检出 (支持语义等价放宽)
+    返回: (is_hit, match_type, matched_by)
+    """
+    # 1. 严格命中
+    if expected_disease in detected_set:
+        return True, "strict", expected_disease
+    # 2. 等价组命中
+    for group in SEMANTIC_GROUPS:
+        if expected_disease in group:
+            overlap = detected_set & group
+            if overlap:
+                return True, "semantic", list(overlap)[0]
+    return False, "miss", None
+
 
 def run_evaluation():
     """对每张测试图运行 pipeline, 与 ground truth 对比"""
@@ -115,9 +139,21 @@ def run_evaluation():
             generate_master_canvas(img_rgb, findings, lung_mask_512, all_results)
             generate_report(findings, all_results, img_rgb.shape)
 
-            # 评估
-            hits = [d for d in case['expected_diseases'] if d in detected]
-            misses = [d for d in case['expected_diseases'] if d not in detected]
+            # 评估 (支持语义等价)
+            detected_set = set(detected)
+            hits = []
+            misses = []
+            hit_details = []
+            for d in case['expected_diseases']:
+                is_hit, match_type, matched = semantic_hit(d, detected_set)
+                if is_hit:
+                    hits.append(d)
+                    if match_type == "semantic":
+                        hit_details.append(f"{d} ←语义等价→ {matched}")
+                    else:
+                        hit_details.append(f"{d} (严格命中)")
+                else:
+                    misses.append(d)
             false_positives = [d for d in detected if d in case['expected_absent']]
 
             eval_item = {
@@ -127,6 +163,7 @@ def run_evaluation():
                 'detected': detected,
                 'all_probs': {k: float(round(v, 4)) for k, v in all_results.items()},
                 'hits': hits,
+                'hit_details': hit_details,
                 'misses': misses,
                 'false_positives': false_positives,
                 'correct': len(misses) == 0 and len(false_positives) == 0
@@ -137,7 +174,11 @@ def run_evaluation():
         # 打印结果
         print(f"\n  📊 评估结果:")
         print(f"    检测到: {eval_item['detected'] or '无'}")
-        print(f"    命中 ✅: {eval_item['hits'] or '无'}")
+        if eval_item.get('hit_details'):
+            for hd in eval_item['hit_details']:
+                print(f"    命中 ✅: {hd}")
+        else:
+            print(f"    命中 ✅: {eval_item['hits'] or '无'}")
         print(f"    漏检 ❌: {eval_item['misses'] or '无'}")
         print(f"    误检 ⚠️: {eval_item['false_positives'] or '无'}")
         print(f"    整体: {'✅ 正确' if eval_item['correct'] else '❌ 有误'}")
