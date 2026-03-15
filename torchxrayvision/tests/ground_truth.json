@@ -1,0 +1,95 @@
+{
+  "description": "手工标注的小型测试集 ground truth (基于公开来源和影像特征)",
+  "source_notes": {
+    "00000001_000.png": "NIH ChestX-ray14 数据集 Patient#1, 官方标签: Cardiomegaly",
+    "00027426_000.png": "NIH ChestX-ray14 数据集 Patient#27426, 影像表现正常",
+    "pneumonia_test.jpg": "RSNA Pneumonia Detection Challenge 样本, 确诊肺炎",
+    "covid-19-pneumonia-58-prior.jpg": "Radiopaedia Case#58, COVID-19确诊, 双肺毛玻璃影",
+    "16747_3_1.jpg": "CheXpert/MIMIC样本, 双肺弥漫性浸润影+实变",
+    "covid_case1_vietnam.jpeg": "COVID-19 Pneumonia - NEJM 10.1056/NEJMc2001272",
+    "covid_case2_vietnam_progression.jpeg": "COVID-19 Pneumonia (progression) - NEJM 10.1056/NEJMc2001272",
+    "ards_case.jpeg": "ARDS - NEJM 10.1056/NEJMc2001272"
+  },
+  "cases": [
+    {
+      "image": "pneumonia_test.jpg",
+      "expected_diseases": [
+        "Pneumonia",
+        "Consolidation"
+      ],
+      "expected_absent": [
+        "Cardiomegaly"
+      ],
+      "description": "经典社区获得性肺炎, 右下肺实变"
+    },
+    {
+      "image": "covid-19-pneumonia-58-prior.jpg",
+      "expected_diseases": [
+        "Pneumonia",
+        "Infiltration"
+      ],
+      "expected_absent": [],
+      "description": "COVID-19肺炎, 双肺多发毛玻璃影, 可见中心静脉导管"
+    },
+    {
+      "image": "00000001_000.png",
+      "expected_diseases": [
+        "Cardiomegaly"
+      ],
+      "expected_absent": [
+        "Pneumonia"
+      ],
+      "description": "心影增大, NIH官方标签Cardiomegaly"
+    },
+    {
+      "image": "00027426_000.png",
+      "expected_diseases": [],
+      "expected_absent": [
+        "Pneumonia",
+        "Cardiomegaly",
+        "Mass"
+      ],
+      "description": "基本正常胸片, 不应检出严重阳性"
+    },
+    {
+      "image": "16747_3_1.jpg",
+      "expected_diseases": [
+        "Infiltration",
+        "Pneumonia"
+      ],
+      "expected_absent": [],
+      "description": "双肺弥漫性浸润影, 可能伴实变"
+    },
+    {
+      "image": "covid_case1_vietnam.jpeg",
+      "expected_diseases": [
+        "Pneumonia",
+        "Infiltration"
+      ],
+      "expected_absent": [],
+      "description": "65岁男性, COVID-19确诊, 左上肺浸润影 (Vietnam Cho Ray Hospital)",
+      "source": "NEJM 10.1056/NEJMc2001272"
+    },
+    {
+      "image": "covid_case2_vietnam_progression.jpeg",
+      "expected_diseases": [
+        "Pneumonia",
+        "Consolidation",
+        "Infiltration"
+      ],
+      "expected_absent": [],
+      "description": "同一患者3天后, 浸润扩大+实变",
+      "source": "NEJM 10.1056/NEJMc2001272"
+    },
+    {
+      "image": "ards_case.jpeg",
+      "expected_diseases": [
+        "Pneumonia",
+        "Consolidation"
+      ],
+      "expected_absent": [],
+      "description": "COVID-19进展为ARDS, 双肺弥漫性白肺",
+      "source": "NEJM 10.1056/NEJMc2001272"
+    }
+  ]
+}
