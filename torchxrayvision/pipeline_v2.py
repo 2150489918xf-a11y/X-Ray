@@ -109,11 +109,12 @@ def _classify_disease_type(name):
 
 def stage1_classify(img_path):
     """
-    输入原始图片，运行 TorchXRayVision DenseNet121。
+    混合方案: DenseNet121 在 224 原生分辨率下分类 (最强灵敏度),
+    同时准备 512 数据流供后续 PSPNet 与 Grad-CAM 升维使用。
     使用 model.op_threshs 动态阈值逐病种判定，按 margin 排序并发检测。
     """
-    global POSITIVE_THRESHOLD  # 运行时设为各病种阈值的中位数, 供可视化用
-    banner("第一阶: 大视野定性 — 动态阈值分类")
+    global POSITIVE_THRESHOLD
+    banner("第一阶: 大视野定性 — DenseNet121-224 + 动态阈值")
 
     # 加载图像
     print(f"  图像路径: {img_path}")
@@ -122,40 +123,47 @@ def stage1_classify(img_path):
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     print(f"  原始尺寸: {img_bgr.shape[1]}x{img_bgr.shape[0]}")
 
-    # 预处理
-    transform = torchvision.transforms.Compose([
+    # === 双轨数据流 (Dual Data Stream) ===
+    # 轨道A: DenseNet121 专用 (224, 原生分辨率)
+    transform_224 = torchvision.transforms.Compose([
         xrv.datasets.XRayCenterCrop(),
         xrv.datasets.XRayResizer(224)
     ])
-    img_224 = transform(img_xrv)
+    img_224 = transform_224(img_xrv)
 
-    # 加载模型
+    # 轨道B: PSPNet / Grad-CAM升维 专用 (512, 高精度)
+    transform_512 = torchvision.transforms.Compose([
+        xrv.datasets.XRayCenterCrop(),
+        xrv.datasets.XRayResizer(512)
+    ])
+    img_512 = transform_512(img_xrv)
+
+    # 加载模型 (混合方案: 保留 DenseNet121-224 最强分类能力)
     model = xrv.models.DenseNet(weights="densenet121-res224-all")
     model = model.to(DEVICE)
     model.eval()
 
-    img_tensor = torch.from_numpy(img_224).unsqueeze(0).to(DEVICE)
+    img_tensor_224 = torch.from_numpy(img_224).unsqueeze(0).to(DEVICE)
 
-    # 推理
+    # 推理 (用 224 张量)
     with torch.no_grad():
-        preds = model(img_tensor)
+        preds = model(img_tensor_224)
     all_results = dict(zip(model.pathologies, preds[0].cpu().numpy()))
 
     # ── 提取模型官方动态最优阈值 ──
-    op_threshs = model.op_threshs  # 与 pathologies 一一对应的阈值数组
-    thresh_map = {}  # name → threshold
+    op_threshs = model.op_threshs
+    thresh_map = {}
     for i, name in enumerate(model.pathologies):
         th = op_threshs[i]
         if not np.isnan(th):
             thresh_map[name] = float(th)
         else:
-            thresh_map[name] = 0.5  # NaN 回退到 0.5
+            thresh_map[name] = 0.5
 
-    # 设置 POSITIVE_THRESHOLD 为所有阈值的中位数 (供可视化参考)
     valid_threshs = [v for v in thresh_map.values() if v < 0.5]
     POSITIVE_THRESHOLD = float(np.median(valid_threshs)) if valid_threshs else 0.1
 
-    # ── 计算每个疾病的 margin (超出专属阈值的幅度) ──
+    # ── 计算每个疾病的 margin ──
     raw_results = []
     for name, prob in all_results.items():
         thresh = thresh_map.get(name, 0.5)
@@ -169,18 +177,16 @@ def stage1_classify(img_path):
             'is_positive': float(prob) > thresh
         })
 
-    # 按 margin 降序排列 (最显著的疾病排最前)
     raw_results.sort(key=lambda x: x['margin'], reverse=True)
 
-    # 打印所有结果
-    print(f"\n  18 项检查结果 (动态阈值):")
+    print(f"\n  18 项检查结果 (动态阈值, DenseNet121-224):")
     for r in raw_results:
         marker = "✅" if r['is_positive'] else "  "
         print(f"    {marker} {r['name_cn']:8s} ({r['name']:30s}): "
               f"{r['prob']:.3f} > {r['thresh']:.4f}  "
               f"margin={r['margin']:+.3f}")
 
-    # ── 并发检测逻辑 (基于 margin) ──
+    # ── 并发检测逻辑 ──
     positives = [r for r in raw_results if r['is_positive']]
 
     if not positives:
@@ -189,7 +195,6 @@ def stage1_classify(img_path):
         print(f"     最接近: {top['name_cn']} (margin={top['margin']:+.3f})")
         return None, None, None, None, None, all_results
 
-    # 收集目标: 所有超过自身 op_thresh 的疾病 (按 margin 排序, 最多取 8 个)
     MAX_CONCURRENT = 8
     targets = []
     for r in positives[:MAX_CONCURRENT]:
@@ -203,14 +208,14 @@ def stage1_classify(img_path):
             'disease_type': disease_type
         })
 
-    # 打印锁定结果
     print(f"\n  🎯 检测到 {len(targets)} 个目标 (动态阈值):")
     for i, t in enumerate(targets, 1):
         print(f"    [{i}] {t['name_cn']} ({t['name']}): "
               f"概率={t['prob']:.3f} > 阈值={t['thresh']:.4f}  "
               f"margin={t['margin']:+.3f}  [{t['disease_type']}]")
 
-    return model, img_tensor, img_224, img_xrv, img_rgb, all_results, targets
+    # 返回: model(224), img_tensor_224, img_512(供升维用), img_xrv, img_rgb, all_results, targets
+    return model, img_tensor_224, img_512, img_xrv, img_rgb, all_results, targets
 
 
 # ============================================================
@@ -219,7 +224,7 @@ def stage1_classify(img_path):
 def stage2_lung_mask(img_xrv):
     """
     运行 PSPNet，但只提取左右肺掩膜作为内部降噪滤网。
-    输出: 224x224 的二值 lung_mask (肺=1, 其他=0)
+    输出: 512x512 的二值 lung_mask (肺=1, 其他=0)
     """
     banner("第二阶: 解剖学遮罩 — PSPNet 肺部掩膜")
 
@@ -249,11 +254,11 @@ def stage2_lung_mask(img_xrv):
             cn = ANATOMY_CN.get(lung_name, lung_name)
             print(f"  ✅ {cn} ({lung_name}) 掩膜提取完成, 面积占比: {area_pct:.1%}")
 
-    # 缩放到 224x224 (与 Grad-CAM 空间一致)
-    lung_mask_224 = cv2.resize(lung_mask_512, (224, 224), interpolation=cv2.INTER_NEAREST)
+    # 升级: 不再缩放! 512x512 直接与 Grad-CAM 空间一致
+    lung_mask_for_cam = lung_mask_512  # 原名 lung_mask_224, 现已统一为 512
 
-    total_lung_pct = lung_mask_224.sum() / (224 * 224)
-    print(f"  📐 肺部掩膜总面积: {total_lung_pct:.1%} (224x224 空间)")
+    total_lung_pct = lung_mask_for_cam.sum() / (512 * 512)
+    print(f"  📐 肺部掩膜总面积: {total_lung_pct:.1%} (512x512 空间)")
 
     # 提取解剖定位信息 (用于后续报告)
     anatomy_masks_512 = {}
@@ -261,7 +266,7 @@ def stage2_lung_mask(img_xrv):
         mask = seg_output[0, i].cpu().numpy()
         anatomy_masks_512[target] = (mask > 0.5).astype(np.uint8)
 
-    return lung_mask_224, lung_mask_512, anatomy_masks_512
+    return lung_mask_for_cam, lung_mask_512, anatomy_masks_512
 
 
 # ============================================================
@@ -288,12 +293,15 @@ MASK_ROUTE_CARDIAC = {'Cardiomegaly', 'Enlarged Cardiomediastinum'}
 MASK_ROUTE_PLEURAL = {'Effusion', 'Pneumothorax', 'Pleural_Thickening', 'Atelectasis'}
 
 
-def stage3_target_extraction(model, img_tensor, img_224, lung_mask_224,
+def stage3_target_extraction(model, img_tensor_224, img_512_unused, lung_mask_512,
                              target_name, anatomy_masks_512=None):
     """
-    仅针对第一阶锁定的目标疾病生成 Grad-CAM。
-    动态掩膜路由 + 多目标 BBox 提取。
-    返回: cam_raw, clean_cam, bboxes_224 (列表!)
+    混合 Grad-CAM 升维桥接:
+    1. 用 DenseNet121 在 224 空间生成原生 Grad-CAM
+    2. 用 INTER_CUBIC 三次样条插值平滑放大到 512
+    3. 用 PSPNet 的 512 肺部掩膜降噪
+    4. 在 512 空间提取精确 BBox
+    返回: cam_raw_512, clean_cam_512, bboxes_512
     """
     banner(f"第三阶: 靶心提取 — {PATHOLOGY_CN.get(target_name, target_name)}")
 
@@ -308,6 +316,7 @@ def stage3_target_extraction(model, img_tensor, img_224, lung_mask_224,
     restore_relu = _patch_inplace_relu()
 
     try:
+        # DenseNet121 的最后一个卷积块
         target_layer = model.features[-1]
         activations, gradients = {}, {}
         def fwd_hook(m, i, o): activations['v'] = o.detach()
@@ -316,7 +325,7 @@ def stage3_target_extraction(model, img_tensor, img_224, lung_mask_224,
         bh = target_layer.register_full_backward_hook(bwd_hook)
 
         model.zero_grad()
-        img_input = img_tensor.detach().clone().requires_grad_(True)
+        img_input = img_tensor_224.detach().clone().requires_grad_(True)
         output = model(img_input)
         output[0, target_idx].backward()
 
@@ -325,22 +334,29 @@ def stage3_target_extraction(model, img_tensor, img_224, lung_mask_224,
         weights = grad.mean(dim=[2, 3], keepdim=True)
         cam = (weights * act).sum(dim=1, keepdim=True)
         cam = F.relu(cam)
+        # 先在 224 空间恢复原尺寸
         cam = F.interpolate(cam, size=(224, 224), mode='bilinear', align_corners=False)
-        cam = cam.squeeze().cpu().numpy()
-        if cam.max() > 0:
-            cam = cam / cam.max()
+        cam_224 = cam.squeeze().cpu().numpy()
+        if cam_224.max() > 0:
+            cam_224 = cam_224 / cam_224.max()
 
         fh.remove()
         bh.remove()
     finally:
         restore_relu()
 
-    print(f"  ✅ Grad-CAM 原始热力图生成完成")
+    print(f"  ✅ Grad-CAM 224 原始热力图生成完成")
+
+    # === 核心升维桥接: 224 → 512 (INTER_CUBIC 三次样条插值) ===
+    cam = cv2.resize(cam_224, (512, 512), interpolation=cv2.INTER_CUBIC)
+    if cam.max() > 0:
+        cam = cam / cam.max()
+    print(f"  ✅ Grad-CAM 升维: 224→512 (INTER_CUBIC)")
 
     # === 动作 B: 病种自适应遮罩 (Dynamic Anatomic Routing) ===
     if target_name in MASK_ROUTE_LUNG:
         # 纯肺内病变: 严格肺掩膜
-        clean_cam = cam * lung_mask_224.astype(np.float32)
+        clean_cam = cam * lung_mask_512.astype(np.float32)
         mask_desc = "严格肺掩膜"
     elif target_name in MASK_ROUTE_CARDIAC:
         # 心血管病变: 不用肺掩膜！
@@ -348,11 +364,11 @@ def stage3_target_extraction(model, img_tensor, img_224, lung_mask_224,
         mask_desc = "无掩膜 (心血管病变)"
     elif target_name in MASK_ROUTE_PLEURAL:
         # 胸膜腔病变: 膨胀肺掩膜, 保留边缘
-        dilated = cv2.dilate(lung_mask_224, np.ones((25, 25), np.uint8), iterations=1)
+        dilated = cv2.dilate(lung_mask_512, np.ones((55, 55), np.uint8), iterations=1)  # 512空间膨胀更大
         clean_cam = cam * dilated.astype(np.float32)
         mask_desc = "膨胀肺掩膜 (保留胸膜边缘)"
     else:
-        clean_cam = cam * lung_mask_224.astype(np.float32)
+        clean_cam = cam * lung_mask_512.astype(np.float32)
         mask_desc = "默认肺掩膜"
 
     if clean_cam.max() > 0:
@@ -362,7 +378,7 @@ def stage3_target_extraction(model, img_tensor, img_224, lung_mask_224,
     print(f"  ✅ 掩膜策略: {mask_desc}, 去噪: {noise_pct:.1f}%")
 
     # === 动作 C: 多目标 BBox 提取 ===
-    bboxes_224 = []
+    bboxes_512 = []
     used_thresh = 0
     for thresh in [0.5, 0.4, 0.3, 0.2]:
         binary = (clean_cam > thresh).astype(np.uint8)
@@ -372,38 +388,38 @@ def stage3_target_extraction(model, img_tensor, img_224, lung_mask_224,
             found = []
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                # 保留 >最大轮廓20% 且 >100像素 的所有区域
-                if area > max_area * 0.20 and area > 100:
+                # 保留 >最大轮廓20% 且 >400像素 的所有区域 (512空间)
+                if area > max_area * 0.20 and area > 400:
                     x, y, w, h = cv2.boundingRect(cnt)
                     box_area = w * h
-                    if box_area < 224 * 224 * 0.6:  # 排除过大框
+                    if box_area < 512 * 512 * 0.6:  # 排除过大框
                         found.append([x, y, x + w, y + h])
             if found:
-                bboxes_224 = found
+                bboxes_512 = found
                 used_thresh = thresh
                 break
 
-    if not bboxes_224:
+    if not bboxes_512:
         cy, cx = np.unravel_index(clean_cam.argmax(), clean_cam.shape)
-        half = 40
-        bboxes_224 = [[
+        half = 90  # 512空间的回退半径
+        bboxes_512 = [[
             int(max(0, cx - half)), int(max(0, cy - half)),
-            int(min(224, cx + half)), int(min(224, cy + half))
+            int(min(512, cx + half)), int(min(512, cy + half))
         ]]
         print(f"  ⚠️ 使用质心回退 bbox")
     else:
-        print(f"  ✅ 提取到 {len(bboxes_224)} 个 bbox (阈值={used_thresh})")
+        print(f"  ✅ 提取到 {len(bboxes_512)} 个 bbox (阈值={used_thresh})")
 
-    for i, bb in enumerate(bboxes_224):
-        print(f"    📍 bbox[{i}] (224空间): {bb}")
+    for i, bb in enumerate(bboxes_512):
+        print(f"    📍 bbox[{i}] (512空间): {bb}")
 
-    return cam, clean_cam, bboxes_224
+    return cam, clean_cam, bboxes_512
 
 
 # ============================================================
 # 第四阶: 智能分流
 # ============================================================
-def stage4_route_diffuse(img_rgb, img_224, clean_cam, bboxes_224, target_name, anatomy_masks_512):
+def stage4_route_diffuse(img_rgb, img_512, clean_cam, bboxes_512, target_name, anatomy_masks_512):
     """
     路线 A: 弥漫性疾病 → 只展示热力图叠加, 不使用 MedSAM
     支持多 bbox (双肺多发)
@@ -417,9 +433,9 @@ def stage4_route_diffuse(img_rgb, img_224, clean_cam, bboxes_224, target_name, a
     cam_orig = cv2.resize(clean_cam, (W, H), interpolation=cv2.INTER_LINEAR)
 
     # 映射所有 bbox 到原始分辨率
-    sx, sy = W / 224, H / 224
+    sx, sy = W / 512, H / 512
     bboxes_orig = []
-    for bb in bboxes_224:
+    for bb in bboxes_512:
         bboxes_orig.append([int(bb[0]*sx), int(bb[1]*sy),
                             int(bb[2]*sx), int(bb[3]*sy)])
     print(f"  📍 {len(bboxes_orig)} 个病灶区域")
@@ -464,20 +480,20 @@ def stage4_route_diffuse(img_rgb, img_224, clean_cam, bboxes_224, target_name, a
     }
 
 
-def stage4_route_solid(img_rgb, clean_cam, bboxes_224, target_name, anatomy_masks_512):
+def stage4_route_solid(img_rgb, clean_cam, bboxes_512, target_name, anatomy_masks_512):
     """
     路线 B: 实体性病灶 → 对每个 bbox 分别使用 MedSAM 精确分割
     """
     banner("第四阶: 实体性病灶 → MedSAM 精确分割")
     target_cn = PATHOLOGY_CN.get(target_name, target_name)
-    print(f"  📋 {target_cn} 属于实体性病灶，{len(bboxes_224)} 个框")
+    print(f"  📋 {target_cn} 属于实体性病灶，{len(bboxes_512)} 个框")
 
     H, W = img_rgb.shape[:2]
-    sx, sy = W / 224, H / 224
+    sx, sy = W / 512, H / 512
 
     # 映射所有 bbox + 10% padding
     bboxes_padded = []
-    for bb in bboxes_224:
+    for bb in bboxes_512:
         bx = [int(bb[0]*sx), int(bb[1]*sy), int(bb[2]*sx), int(bb[3]*sy)]
         bw, bh = bx[2]-bx[0], bx[3]-bx[1]
         mx, my = int(bw*0.10), int(bh*0.10)  # 10% padding
@@ -601,13 +617,13 @@ def nms_merge_findings(all_target_results, img_shape):
     """
     banner("NMS 空间语义合并")
     H, W = img_shape[:2]
-    sx, sy = W / 224, H / 224
+    sx, sy = W / 512, H / 512
     n = len(all_target_results)
 
     # 将所有目标的主 bbox 转到同一空间 (原图空间)
     orig_bboxes = []
     for tr in all_target_results:
-        bbs = tr['bboxes_224']
+        bbs = tr['bboxes_512']
         # 取最大的 bbox 作为代表
         if bbs:
             biggest = max(bbs, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
@@ -883,10 +899,10 @@ if __name__ == "__main__":
         print("\n✅ 分析完成: 未见明显异常")
         sys.exit(0)
 
-    model, img_tensor, img_224, img_xrv, img_rgb, all_results, targets = result
+    model, img_tensor, img_512, img_xrv, img_rgb, all_results, targets = result
 
     # === 第二阶: 肺掩膜 ===
-    lung_mask_224, lung_mask_512, anatomy_masks_512 = stage2_lung_mask(img_xrv)
+    lung_mask_512, lung_mask_512_raw, anatomy_masks_512 = stage2_lung_mask(img_xrv)
 
     # === 第三阶 + 第四阶: 逐目标处理 ===
     all_target_results = []
@@ -899,15 +915,15 @@ if __name__ == "__main__":
         if len(targets) > 1:
             banner(f"处理目标 [{i+1}/{len(targets)}]: {target['name_cn']}")
 
-        cam_raw, clean_cam, bboxes_224 = stage3_target_extraction(
-            model, img_tensor, img_224, lung_mask_224, target_name)
+        cam_raw, clean_cam, bboxes_512 = stage3_target_extraction(
+            model, img_tensor, img_512, lung_mask_512, target_name)
 
         if disease_type == "solid":
             stage4_result = stage4_route_solid(
-                img_rgb, clean_cam, bboxes_224, target_name, anatomy_masks_512)
+                img_rgb, clean_cam, bboxes_512, target_name, anatomy_masks_512)
         else:
             stage4_result = stage4_route_diffuse(
-                img_rgb, img_224, clean_cam, bboxes_224, target_name, anatomy_masks_512)
+                img_rgb, img_512, clean_cam, bboxes_512, target_name, anatomy_masks_512)
 
         stage4_result['is_suspect'] = is_suspect
 
@@ -915,7 +931,7 @@ if __name__ == "__main__":
             'target': target,
             'cam_raw': cam_raw,
             'clean_cam': clean_cam,
-            'bboxes_224': bboxes_224,
+            'bboxes_512': bboxes_512,
             'stage4': stage4_result
         })
 
@@ -923,7 +939,7 @@ if __name__ == "__main__":
     findings = nms_merge_findings(all_target_results, img_rgb.shape)
 
     # === Master Canvas ===
-    generate_master_canvas(img_rgb, findings, lung_mask_224, all_results)
+    generate_master_canvas(img_rgb, findings, lung_mask_512, all_results)
 
     # === 报告 ===
     report = generate_report(findings, all_results, img_rgb.shape)

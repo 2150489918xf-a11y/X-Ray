@@ -87,32 +87,32 @@ def run_evaluation():
                 'correct': len(case['expected_diseases']) == 0
             }
         else:
-            model, img_tensor, img_224, img_xrv, img_rgb, all_results, targets = result
+            model, img_tensor, img_512, img_xrv, img_rgb, all_results, targets = result
             detected = [t['name'] for t in targets]
 
             # 继续跑完整流水线
-            lung_mask_224, lung_mask_512, anatomy_masks_512 = stage2_lung_mask(img_xrv)
+            lung_mask_512, lung_mask_512_raw, anatomy_masks_512 = stage2_lung_mask(img_xrv)
 
             all_target_results = []
             for i, target in enumerate(targets):
-                cam_raw, clean_cam, bboxes_224 = stage3_target_extraction(
-                    model, img_tensor, img_224, lung_mask_224, target['name'])
+                cam_raw, clean_cam, bboxes_512 = stage3_target_extraction(
+                    model, img_tensor, img_512, lung_mask_512, target['name'])
 
                 if target['disease_type'] == "solid":
                     s4 = stage4_route_solid(
-                        img_rgb, clean_cam, bboxes_224, target['name'], anatomy_masks_512)
+                        img_rgb, clean_cam, bboxes_512, target['name'], anatomy_masks_512)
                 else:
                     s4 = stage4_route_diffuse(
-                        img_rgb, img_224, clean_cam, bboxes_224, target['name'], anatomy_masks_512)
+                        img_rgb, img_512, clean_cam, bboxes_512, target['name'], anatomy_masks_512)
 
                 s4['is_suspect'] = target.get('suspect', False)
                 all_target_results.append({
                     'target': target, 'cam_raw': cam_raw,
-                    'clean_cam': clean_cam, 'bboxes_224': bboxes_224, 'stage4': s4
+                    'clean_cam': clean_cam, 'bboxes_512': bboxes_512, 'stage4': s4
                 })
 
             findings = nms_merge_findings(all_target_results, img_rgb.shape)
-            generate_master_canvas(img_rgb, findings, lung_mask_224, all_results)
+            generate_master_canvas(img_rgb, findings, lung_mask_512, all_results)
             generate_report(findings, all_results, img_rgb.shape)
 
             # 评估
